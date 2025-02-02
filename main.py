@@ -9,10 +9,14 @@ import os
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# Load the model
 def load_model(model_name='efficientnet_b0'):
-    with open(f'saved_models/{model_name}_full_model.pkl', 'rb') as f:
-        model = pickle.load(f, map_location=torch.device('cpu'))
+    model_path = f'saved_models/{model_name}_full_model.pkl'
+    
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)  # Load the model
+
+    model.to(torch.device('cpu'))  # Move model to CPU
+    model.eval()  # Set model to evaluation mode
     return model
 
 model = load_model()
