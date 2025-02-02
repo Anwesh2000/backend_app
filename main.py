@@ -4,7 +4,7 @@ import torch
 from torchvision import transforms
 from PIL import Image
 import pickle
-import os
+
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -83,4 +83,4 @@ def predict():
     return jsonify(result)
 
 if __name__ == '__main__':
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(debug=False, host="0.0.0.0")
