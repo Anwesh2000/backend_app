@@ -12,7 +12,7 @@ CORS(app)  # Enable CORS for all routes
 # Load the model
 def load_model(model_name='efficientnet_b0'):
     with open(f'saved_models/{model_name}_full_model.pkl', 'rb') as f:
-        model = pickle.load(f)
+        model = pickle.load(f, map_location=torch.device('cpu'))
     return model
 
 model = load_model()
