@@ -4,10 +4,125 @@ import torch
 from torchvision import transforms
 from PIL import Image
 import pickle
-
+from flask_bcrypt import Bcrypt
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
+from flask_mail import Mail, Message
+from datetime import datetime, timedelta
+import random
+import string
+from pymongo.server_api import ServerApi
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
+
+
+
+# JWT Configuration
+app.config['JWT_SECRET_KEY'] = '1234'  # Change this to a secure key in production
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 3600  # Token expires in 1 hour
+# Configure Flask-Mail
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # Use your SMTP provider
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = 'smita.app7@gmail.com'  # Set your email
+app.config['MAIL_PASSWORD'] = 'isjakmaxqdpqkqkl'  # Set your password
+
+mail = Mail(app)
+
+bcrypt = Bcrypt(app)
+jwt = JWTManager(app)
+
+# Connect to MongoDB
+client = MongoClient('mongodb+srv://mupparapukoushik:Shadow_slave@cluster0.wl4w8.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
+db = client['auth_db']
+users = db['users']
+
+# Ensure unique email index
+users.create_index("email", unique=True)  # Prevent duplicate email 
+
+
+# Generate OTP function
+def generate_otp():
+    return ''.join(random.choices(string.digits, k=6))  # 6-digit OTP
+
+
+
+@app.route('/verify-otp', methods=['POST'])
+def verify_otp():
+    data = request.json
+    if not data or "email" not in data or "otp" not in data:
+        return jsonify({"message": "Missing fields"}), 400
+
+    user = users.find_one({"email": data['email']})
+
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    # Check OTP and expiry
+    if user['otp'] != data['otp']:
+        return jsonify({"message": "Invalid OTP"}), 400
+
+    if datetime.utcnow() > user['otp_expiry']:
+        return jsonify({"message": "OTP expired"}), 400
+
+    # Update user as verified
+    users.update_one({"email": data['email']}, {"$set": {"verified": True}, "$unset": {"otp": "", "otp_expiry": ""}})
+    
+    return jsonify({"message": "OTP verified successfully!"}), 200
+
+
+# Signup Route with OTP sending
+@app.route('/signup', methods=['POST'])
+def signup():
+    data = request.json
+    if not data or "username" not in data or "email" not in data or "password" not in data:
+        return jsonify({"message": "Missing fields"}), 400
+
+    hashed_pw = bcrypt.generate_password_hash(data['password']).decode('utf-8')
+
+    otp = generate_otp()
+    otp_expiry = datetime.utcnow() + timedelta(minutes=10)  # OTP valid for 10 min
+
+    try:
+        users.insert_one({
+            "username": data['username'],
+            "email": data['email'],
+            "password": hashed_pw,
+            "otp": otp,
+            "otp_expiry": otp_expiry,
+            "verified": False  # User needs OTP verification
+        })
+
+        # Send OTP Email
+        msg = Message('Your OTP Code', sender='smita.app7@gmail.com', recipients=[data['email']])
+        msg.body = f'Your OTP is {otp}. It will expire in 10 minutes.'
+        mail.send(msg)
+
+        return jsonify({"message": "OTP sent to your email!"}), 201
+    except DuplicateKeyError:
+        return jsonify({"message": "Email already exists"}), 400
+
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    if not data or "email" not in data or "password" not in data:
+        return jsonify({"message": "Missing fields"}), 400
+
+    user = users.find_one({"email": data['email']})
+    if not user:
+        return jsonify({"message": "Invalid credentials"}), 401
+
+    if not user.get('verified', False):
+        return jsonify({"message": "Please verify your email first"}), 403
+
+    if bcrypt.check_password_hash(user['password'], data['password']):
+        token = create_access_token(identity=data['email'])
+        return jsonify({"token": token}), 200
+
+    return jsonify({"message": "Invalid credentials"}), 401
 
 def load_model(model_name='efficientnet_b0'):
     model_path = f'saved_models/{model_name}_full_model.pkl'
