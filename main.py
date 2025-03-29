@@ -83,7 +83,7 @@ def get_users():
          user['_id'] = str(user['_id'])
     return jsonify(all_users), 200
 
-# Signup Route with OTP sending
+
 @app.route('/signup', methods=['POST'])
 def signup():
     data = request.json
@@ -94,23 +94,18 @@ def signup():
     otp = generate_otp()
     otp_expiry = datetime.utcnow() + timedelta(minutes=10)  # OTP valid for 10 min
 
-    try:
-        users.insert_one({
-            "username": data['username'],
-            "email": data['email'],
-            "password": hashed_pw,
-            "otp": otp,
-            "otp_expiry": otp_expiry,
-            "verified": False  # User needs OTP verification
-        })
+    existing_user = users.find_one({"email": data['email']})
 
-        # Send OTP Email
-        msg = Message('Your OTP Code', sender='smita.app7@gmail.com', recipients=[data['email']])
-        msg.body = f'Your OTP is {otp}. It will expire in 10 minutes.'
-        mail.send(msg)
-        return jsonify({"message": "OTP sent to your email!"}), 201
-    except DuplicateKeyError:
-        return jsonify({"message": "Email already exists"}), 400
+    if existing_user:
+        if existing_user.get("verified"):  # User already verified
+            return jsonify({"message": "Email already exists"}), 400
+        else:
+            # Resend OTP
+            users.update_one({"email": data['email']}, {"$set": {"otp": otp, "otp_expiry": otp_expiry}})
+            msg = Message('Your OTP Code', sender='smita.app7@gmail.com', recipients=[data['email']])
+            msg.body = f'Your OTP is {otp}. It will expire in 10 minutes.'
+            mail.send(msg)
+            return jsonify({"message": "OTP resent to your email!"}), 200
 
 # Login Route
 @app.route('/login', methods=['POST'])
