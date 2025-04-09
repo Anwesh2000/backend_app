@@ -13,6 +13,10 @@ from datetime import datetime, timedelta
 import random
 import string
 from pymongo.server_api import ServerApi
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+# from bson import ObjectId
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -37,6 +41,15 @@ jwt = JWTManager(app)
 client = MongoClient('mongodb+srv://mupparapukoushik:Shadow_slave@cluster0.wl4w8.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
 db = client['auth_db']
 users = db['users']
+feedbacks = db['feedbacks']
+
+# Cloudinary Configuration
+cloudinary.config(
+    cloud_name="dea33xdja",
+    api_key="965866172536318",
+    api_secret="Zx2O5Q9xLexjty6FO6a358wOuEU"
+)
+
 
 # Ensure unique email index
 users.create_index("email", unique=True)  # Prevent duplicate email 
@@ -106,6 +119,25 @@ def signup():
             msg.body = f'Your OTP is {otp}. It will expire in 10 minutes.'
             mail.send(msg)
             return jsonify({"message": "OTP resent to your email!"}), 200
+
+    # Insert new user
+    try:
+        users.insert_one({
+            "username": data['username'],
+            "email": data['email'],
+            "password": hashed_pw,
+            "otp": otp,
+            "otp_expiry": otp_expiry,
+            "verified": False  # User needs OTP verification
+        })
+
+        # Send OTP Email
+        msg = Message('Your OTP Code', sender='smita.app7@gmail.com', recipients=[data['email']])
+        msg.body = f'Your OTP is {otp}. It will expire in 10 minutes.'
+        mail.send(msg)
+        return jsonify({"message": "OTP sent to your email!"}), 201
+    except DuplicateKeyError:
+        return jsonify({"message": "Email already exists"}), 400
 
 # Login Route
 @app.route('/login', methods=['POST'])
@@ -224,25 +256,33 @@ def prepare_image(image):
     return image.unsqueeze(0)
 
 @app.route('/form_submit', methods=['POST'])
-@jwt_required()  # Ensure only authenticated users can submit
+@jwt_required()
 def form_submit():
     try:
         current_user_email = get_jwt_identity()
+
         if 'image' not in request.files:
             return jsonify({'error': 'No image provided'}), 400
+
         image_file = request.files['image']
+
+        # Upload image to Cloudinary
+        upload_result = cloudinary.uploader.upload(image_file)
+        image_url = upload_result.get("secure_url")  # Get Cloudinary image URL
+
+        # Process image with model
         image = prepare_image(image_file)
-        
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         model.to(device)
         image = image.to(device)
-        
+
         with torch.no_grad():
             outputs = model(image)
             probabilities = torch.softmax(outputs, dim=1)
             prediction = torch.argmax(outputs, dim=1).item()
             confidence = f"{probabilities[0][prediction].item():.2%}"
-        
+
+        # Store form data in MongoDB (including Cloudinary URL)
         form_data = {
             'date': request.form.get('date'),
             'smitaId': request.form.get('smitaId'),
@@ -258,19 +298,23 @@ def form_submit():
             'income': request.form.get('income'),
             'phoneNumber': request.form.get('phoneNumber'),
             'address': request.form.get('address'),
+            'type': request.form.get('type'),
             'prediction': 'Lesion' if prediction == 1 else 'Normal',
             'confidence': confidence,
+            'image_url': image_url,  # Store Cloudinary URL
             'user_email': current_user_email,
             'timestamp': datetime.utcnow()
         }
-        
+
         users.update_one({"email": current_user_email}, {"$push": {"form_submissions": form_data}})
-        
+
         return jsonify({
             'prediction': form_data['prediction'],
             'confidence': confidence,
+            'image_url': image_url,  # Return Cloudinary URL
             'message': 'Form submitted and stored successfully'
         }), 200
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -317,6 +361,183 @@ def predict():
         'confidence': f"{probability:.2%}"
     }
     return jsonify(result)
+
+@app.route('/add-comment', methods=['POST'])
+@jwt_required()
+def add_comment():
+    # Extract data from form (instead of request.json)
+    print("Received Form Data:", request.form)
+
+    comment_text = request.form.get("comment")
+    smita_id = request.form.get("smitaId")  # Required for database update
+
+    if not comment_text or not smita_id:
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    current_email = get_jwt_identity()
+
+    user = users.find_one({'email': current_email})
+    print(f"Current User: {current_email}, User Found: {user}")  # Debugging print
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+
+    username = user.get('username', 'Anonymous')
+    comment = {
+        'username': username,
+        'comment': comment_text,
+        'timestamp': datetime.utcnow()
+    }
+    print("Received comment:", comment)
+    
+    # Check if the submission exists before updating
+    existing_submission = users.find_one(
+    {
+        'form_submissions.smitaId': smita_id
+    },
+        {'form_submissions.$': 1}  # Project only the matching submission
+    )
+
+    print("Matching Submission:", existing_submission)
+
+
+    result = users.update_one(
+        {
+            'form_submissions.smitaId': smita_id,
+        },
+        {
+            '$push': {
+                'form_submissions.$.comments': comment
+            }
+        }
+    )
+    
+    print("Modified Count:", result.modified_count)  # Debugging print
+
+
+    if result.modified_count == 0:
+        return jsonify({'message': 'Submission not found or comment not added'}), 400
+
+    return jsonify({'message': 'Comment added successfully', 'comment': comment}), 200
+    
+    
+@app.route('/get-comments/<smita_id>', methods=['GET'])
+# @jwt_required()
+def get_comments(smita_id):
+    # current_email = get_jwt_identity()
+
+    # user = users.find_one({'email': current_email})
+    # if not user:
+    #     return jsonify({'message': 'User not found'}), 404
+
+    # Find the submission matching the given smita_id
+    
+    submission = users.find_one(
+        {'form_submissions.smitaId': smita_id},
+        {'form_submissions.$': 1}  # Project only the matching submission
+    )
+
+    if not submission or 'form_submissions' not in submission:
+        return jsonify({'message': 'Submission not found'}), 404
+
+    comments = submission['form_submissions'][0].get('comments', [])
+
+    return jsonify({'comments': comments}), 200
+
+@app.route('/edit-comment/<smita_id>', methods=['PUT'])
+# @jwt_required()
+def edit_comment(smita_id):
+    data = request.get_json()
+    comment_index = data.get("comment_index")  # Index of the comment to be edited
+    new_comment_text = data.get("new_comment")
+
+    if comment_index is None or new_comment_text is None:
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    # Find the submission matching the given smita_id
+    submission = users.find_one(
+        {'form_submissions.smitaId': smita_id},
+        {'form_submissions.$': 1}
+    )
+
+    if not submission or 'form_submissions' not in submission:
+        return jsonify({'message': 'Submission not found'}), 404
+
+    form_submission = submission['form_submissions'][0]
+    comments = form_submission.get('comments', [])
+
+    # Ensure the comment index is within range
+    if comment_index < 0 or comment_index >= len(comments):
+        return jsonify({'message': 'Invalid comment index'}), 400
+
+    # Update the comment text
+    comments[comment_index]['comment'] = new_comment_text
+    comments[comment_index]['edited_timestamp'] = datetime.utcnow()
+
+    # Update the comment in the database
+    result = users.update_one(
+        {'form_submissions.smitaId': smita_id},
+        {'$set': {'form_submissions.$.comments': comments}}
+    )
+
+    if result.modified_count == 0:
+        return jsonify({'message': 'Comment not updated'}), 400
+
+    return jsonify({'message': 'Comment updated successfully', 'updated_comment': comments[comment_index]}), 200
+
+@app.route('/check_feedback', methods=['GET'])
+@jwt_required()
+def check_feedback():
+    user_id = get_jwt_identity()
+    existing = feedbacks.find_one({"userId": user_id})
+    return jsonify({"submitted": bool(existing)})
+
+
+@app.route('/submit_feedback', methods=['POST'])
+@jwt_required()
+def submit_feedback():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    answers = data.get('answers', [])
+
+    if not answers or len(answers) != 7:
+        return jsonify({"message": "All questions must be answered."}), 400
+
+    feedbacks.insert_one({"userId": user_id, "answers": answers})
+    return jsonify({"message": "Feedback submitted successfully"}), 200
+
+@app.route('/admin/feedbacks', methods=['GET'])
+@jwt_required()
+def get_all_feedbacks():
+    # Get user email from JWT
+    current_email = get_jwt_identity()
+    
+    # Check if the user is an admin
+    if current_email not in admin_emails:
+        return jsonify({'message': 'Unauthorized access'}), 403
+    
+    # Check if a specific userId was requested
+    specific_user_id = request.args.get('userId')
+    
+    # Prepare the query
+    query = {}
+    if specific_user_id:
+        query = {"userId": specific_user_id}
+    
+    # Fetch feedback submissions
+    all_feedbacks = list(feedbacks.find(query))
+    
+    # Add username information to each feedback
+    for feedback in all_feedbacks:
+        if '_id' in feedback:
+            feedback['_id'] = str(feedback['_id'])
+        
+        # Look up the username for this feedback's userId
+        if 'userId' in feedback:
+            user = users.find_one({"email": feedback['userId']})
+            if user and 'username' in user:
+                feedback['username'] = user['username']
+    
+    return jsonify(all_feedbacks)
 
 # if __name__ == '__main__':
 #     app.run(debug=True, host="0.0.0.0", port="8080")
