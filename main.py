@@ -16,32 +16,37 @@ from pymongo.server_api import ServerApi
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
-# from bson import ObjectId
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 # JWT Configuration
 app.config['JWT_SECRET_KEY'] = '1234'  # Change this to a secure key in production
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 3600  # Token expires in 1 hour
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 36000  # Token expires in 1 hour
 
 # Configure Flask-Mail
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # Use your SMTP provider
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = 'smita.app7@gmail.com'  # Set your email
-app.config['MAIL_PASSWORD'] = 'isjakmaxqdpqkqkl'  # Set your password
+app.config['MAIL_USERNAME'] = 'smitaapp2@gmail.com'  # Set your email
+app.config['MAIL_PASSWORD'] = 'shavsqhfvwuljtal'  # Set your password
 
 mail = Mail(app)
 bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
+
 # Connect to MongoDB
 # client = MongoClient('mongodb://localhost:27017/')
+
 client = MongoClient('mongodb+srv://mupparapukoushik:Shadow_slave@cluster0.wl4w8.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
+
 db = client['auth_db']
 users = db['users']
 feedbacks = db['feedbacks']
+
+# Ensure unique email index
+users.create_index("email", unique=True)  # Prevent duplicate email 
 
 # Cloudinary Configuration
 cloudinary.config(
@@ -50,9 +55,12 @@ cloudinary.config(
     api_secret="Zx2O5Q9xLexjty6FO6a358wOuEU"
 )
 
-
-# Ensure unique email index
-users.create_index("email", unique=True)  # Prevent duplicate email 
+@jwt.expired_token_loader
+def my_expired_token_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'message': 'Token has expired',
+        'error': 'token_expired'
+    }), 440  # Use 440 (Login Timeout) or any custom code
 
 # Generate OTP function
 def generate_otp():
@@ -81,6 +89,8 @@ def verify_otp():
 # Predefined admin emails
 admin_emails = ["admin1@gmail.com", "admin2@gmail.com", "admin3@gmail.com"]
 
+
+
 @app.route('/admin/users', methods=['GET'])
 @jwt_required()
 def get_users():
@@ -95,6 +105,7 @@ def get_users():
     for user in all_users:
          user['_id'] = str(user['_id'])
     return jsonify(all_users), 200
+
 
 
 @app.route('/signup', methods=['POST'])
@@ -138,6 +149,7 @@ def signup():
         return jsonify({"message": "OTP sent to your email!"}), 201
     except DuplicateKeyError:
         return jsonify({"message": "Email already exists"}), 400
+
 
 # Login Route
 @app.route('/login', methods=['POST'])
@@ -255,34 +267,48 @@ def prepare_image(image):
     image = transform(image)
     return image.unsqueeze(0)
 
+
+
+
 @app.route('/form_submit', methods=['POST'])
 @jwt_required()
 def form_submit():
     try:
         current_user_email = get_jwt_identity()
 
-        if 'image' not in request.files:
-            return jsonify({'error': 'No image provided'}), 400
-
-        image_file = request.files['image']
-
-        # Upload image to Cloudinary
-        upload_result = cloudinary.uploader.upload(image_file)
-        image_url = upload_result.get("secure_url")  # Get Cloudinary image URL
-
-        # Process image with model
-        image = prepare_image(image_file)
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         model.to(device)
-        image = image.to(device)
+        model.eval()
 
-        with torch.no_grad():
-            outputs = model(image)
-            probabilities = torch.softmax(outputs, dim=1)
-            prediction = torch.argmax(outputs, dim=1).item()
-            confidence = f"{probabilities[0][prediction].item():.2%}"
+        image_urls = {}
+        predictions = {}
 
-        # Store form data in MongoDB (including Cloudinary URL)
+        regions = ['dorsal', 'ventral', 'leftBuccal', 'rightBuccal',
+                   'upperLip', 'lowerLip', 'upperArch', 'lowerArch']
+
+        for region in regions:
+            file = request.files.get(region)
+            if file:
+                # Upload image to Cloudinary
+                upload_result = cloudinary.uploader.upload(file)
+                image_url = upload_result.get("secure_url")
+                image_urls[region] = image_url
+
+                # Prepare and predict using the model
+                image = prepare_image(file)
+                image = image.to(device)
+
+                with torch.no_grad():
+                    outputs = model(image)
+                    probabilities = torch.softmax(outputs, dim=1)
+                    pred_class = torch.argmax(probabilities, dim=1).item()
+                    confidence = f"{probabilities[0][pred_class].item():.2%}"
+
+                predictions[region] = {
+                    "prediction": "Lesion" if pred_class == 1 else "Normal",
+                    "confidence": confidence
+                }
+
         form_data = {
             'date': request.form.get('date'),
             'smitaId': request.form.get('smitaId'),
@@ -299,24 +325,29 @@ def form_submit():
             'phoneNumber': request.form.get('phoneNumber'),
             'address': request.form.get('address'),
             'type': request.form.get('type'),
-            'prediction': 'Lesion' if prediction == 1 else 'Normal',
-            'confidence': confidence,
-            'image_url': image_url,  # Store Cloudinary URL
             'user_email': current_user_email,
             'timestamp': datetime.utcnow()
         }
 
+        # Add prediction results and image URLs to form_data
+        for region in regions:
+            if region in predictions:
+                form_data[f"{region}_prediction"] = predictions[region]['prediction']
+                form_data[f"{region}_confidence"] = predictions[region]['confidence']
+            if region in image_urls:
+                form_data[f"{region}_image_url"] = image_urls[region]
+
         users.update_one({"email": current_user_email}, {"$push": {"form_submissions": form_data}})
 
         return jsonify({
-            'prediction': form_data['prediction'],
-            'confidence': confidence,
-            'image_url': image_url,  # Return Cloudinary URL
-            'message': 'Form submitted and stored successfully'
+            "message": "Form submitted and stored successfully",
+            "data": form_data
         }), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -498,12 +529,19 @@ def submit_feedback():
     user_id = get_jwt_identity()
     data = request.get_json()
     answers = data.get('answers', [])
+    text_feedback = data.get('textFeedback', '')
 
-    if not answers or len(answers) != 7:
+    if not answers or len(answers) != 6:
         return jsonify({"message": "All questions must be answered."}), 400
 
-    feedbacks.insert_one({"userId": user_id, "answers": answers})
+    feedbacks.insert_one({
+        "userId": user_id,
+        "answers": answers,
+        "textFeedback": text_feedback
+    })
+
     return jsonify({"message": "Feedback submitted successfully"}), 200
+
 
 @app.route('/admin/feedbacks', methods=['GET'])
 @jwt_required()
@@ -538,6 +576,14 @@ def get_all_feedbacks():
                 feedback['username'] = user['username']
     
     return jsonify(all_feedbacks)
+
+@app.route('/reset-feedback', methods=['DELETE'])
+@jwt_required()
+def reset_feedback():
+    feedbacks.delete_many({})
+    return jsonify({"message": "All feedback has been reset."}), 200
+
+
 
 # if __name__ == '__main__':
 #     app.run(debug=True, host="0.0.0.0", port="8080")
