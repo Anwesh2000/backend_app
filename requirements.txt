@@ -1,6 +1,6 @@
 Flask==3.0.3
 Flask-Cors==4.0.1
-torch==2.5.0
+torch==2.6.0
 torchvision==0.21.0
 Pillow
 gunicorn==21.2.0
